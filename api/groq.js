@@ -14,12 +14,20 @@ export default async function handler(req, res) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: temperature || 0.7, maxOutputTokens: max_tokens || 4000 }
+          generationConfig: {
+            temperature: temperature || 0.7,
+            maxOutputTokens: max_tokens || 4000,
+            responseMimeType: 'application/json'  // ← примушує Gemini повертати чистий JSON
+          }
         })
       }
     );
     const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    let text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    // Очищаємо на випадок якщо все ж є markdown
+    text = text.replace(/```json|```/g, '').trim();
+    // Перевіряємо що JSON валідний
+    JSON.parse(text);
     res.status(200).json({
       choices: [{ message: { content: text } }]
     });
