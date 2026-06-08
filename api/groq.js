@@ -17,17 +17,15 @@ export default async function handler(req, res) {
           generationConfig: {
             temperature: temperature || 0.7,
             maxOutputTokens: max_tokens || 4000,
-            responseMimeType: 'application/json'  // ← примушує Gemini повертати чистий JSON
+            responseMimeType: 'application/json'
           }
         })
       }
     );
     const data = await response.json();
     let text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    // Очищаємо на випадок якщо все ж є markdown
     text = text.replace(/```json|```/g, '').trim();
-    // Перевіряємо що JSON валідний
-    JSON.parse(text);
+    // НЕ робимо JSON.parse тут — просто повертаємо текст
     res.status(200).json({
       choices: [{ message: { content: text } }]
     });
