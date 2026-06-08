@@ -16,7 +16,7 @@ export default async function handler(req, res) {
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: temperature || 0.7,
-            maxOutputTokens: max_tokens || 4000,
+            maxOutputTokens: max_tokens || 8000,
             responseMimeType: 'application/json'
           }
         })
