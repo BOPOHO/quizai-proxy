@@ -5,44 +5,17 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
   try {
-    const { messages, max_tokens, temperature } = req.body;
-    const prompt = messages.map(m => m.content).join('\n');
-    const response = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + process.env.GEMINI_API_KEY,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: temperature || 0.7,
-            maxOutputTokens: max_tokens || 8000,
-            responseMimeType: 'application/json'
-          }
-        })
-      }
-    );
-    const data = await response.json();
-    
-    // Логуємо що повернув Gemini
-    console.log('Gemini response:', JSON.stringify(data).slice(0, 500));
-    
-    const candidate = data.candidates?.[0];
-    const finishReason = candidate?.finishReason;
-    const text = candidate?.content?.parts?.[0]?.text || '';
-    
-    // Якщо Gemini обрізав — повертаємо помилку з деталями
-    if (!text) {
-      return res.status(500).json({ 
-        error: 'Empty response from Gemini', 
-        finishReason,
-        raw: JSON.stringify(data).slice(0, 300)
-      });
-    }
-    
-    res.status(200).json({
-      choices: [{ message: { content: text } }]
+    const body = req.body;
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.GROQ_API_KEY
+      },
+      body: JSON.stringify(body)
     });
+    const data = await response.json();
+    res.status(200).json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
