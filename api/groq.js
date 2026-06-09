@@ -23,9 +23,23 @@ export default async function handler(req, res) {
       }
     );
     const data = await response.json();
-    let text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    text = text.replace(/```json|```/g, '').trim();
-    // НЕ робимо JSON.parse тут — просто повертаємо текст
+    
+    // Логуємо що повернув Gemini
+    console.log('Gemini response:', JSON.stringify(data).slice(0, 500));
+    
+    const candidate = data.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+    const text = candidate?.content?.parts?.[0]?.text || '';
+    
+    // Якщо Gemini обрізав — повертаємо помилку з деталями
+    if (!text) {
+      return res.status(500).json({ 
+        error: 'Empty response from Gemini', 
+        finishReason,
+        raw: JSON.stringify(data).slice(0, 300)
+      });
+    }
+    
     res.status(200).json({
       choices: [{ message: { content: text } }]
     });
