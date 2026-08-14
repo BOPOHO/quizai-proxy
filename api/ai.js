@@ -1,7 +1,7 @@
 // api/ai.js — Vercel serverless function
-// Два провайдера: Groq и Gemini. Каждый со своей ротацией ключей.
-// priority: "quality" — сначала Gemini, потом Groq (для генерации теста)
-// priority: "speed"   — сначала Groq, потом Gemini (для проверки ответов ученика в реальном времени)
+// Три провайдера: Gemini, Cerebras, Groq. Каждый со своей ротацией ключей.
+// priority: "quality" — сначала Gemini, потом Cerebras, потом Groq (для генерации теста)
+// priority: "speed"   — сначала Groq, потом Cerebras, потом Gemini (для проверки ответов ученика в реальном времени)
 
 function loadKeys(prefix) {
   const keys = [];
@@ -41,6 +41,37 @@ async function tryGroq(body, keys) {
   return { ok: false, error: lastError, status: lastStatus };
 }
 
+// Cerebras — OpenAI-совместимый формат, как Groq. Бесплатный тариф:
+// 1 млн токенов/день, без карты. Модель llama-3.3-70b (не -versatile, у Cerebras своё имя).
+async function tryCerebras(body, keys) {
+  let lastError = null, lastStatus = null;
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      const response = await fetch('https://api.cerebras.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keys[i] },
+        body: JSON.stringify({ ...body, model: 'llama-3.3-70b' }),
+      });
+      if (response.status === 429 || response.status >= 500) {
+        lastError = 'Cerebras HTTP ' + response.status + ' on key #' + (i + 1);
+        lastStatus = response.status;
+        continue;
+      }
+      const data = await response.json();
+      if (!response.ok) {
+        lastError = 'Cerebras HTTP ' + response.status + ' on key #' + (i + 1) + ': ' + JSON.stringify(data).slice(0, 200);
+        lastStatus = response.status;
+        continue;
+      }
+      return { ok: true, data, providerUsed: 'cerebras', keyIndex: i + 1 };
+    } catch (e) {
+      lastError = 'Cerebras network error on key #' + (i + 1) + ': ' + e.message;
+      continue;
+    }
+  }
+  return { ok: false, error: lastError, status: lastStatus };
+}
+
 async function tryGemini(body, keys) {
   const geminiMessages = body.messages || [];
   const systemMsg = geminiMessages.find(m => m.role === 'system')?.content || '';
@@ -53,8 +84,9 @@ async function tryGemini(body, keys) {
   let lastError = null, lastStatus = null;
   for (let i = 0; i < keys.length; i++) {
     try {
+      // gemini-2.0-flash отключена Google 1 июня 2026 — используем актуальную замену
       const gRes = await fetch(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + keys[i],
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + keys[i],
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -103,8 +135,9 @@ export default async function handler(req, res) {
 
   const groqKeys = loadKeys('GROQ_KEY');
   const geminiKeys = loadKeys('GEMINI_KEY').length ? loadKeys('GEMINI_KEY') : (process.env.GEMINI_API_KEY ? [process.env.GEMINI_API_KEY] : []);
+  const cerebrasKeys = loadKeys('CEREBRAS_KEY').length ? loadKeys('CEREBRAS_KEY') : (process.env.CEREBRAS_API_KEY ? [process.env.CEREBRAS_API_KEY] : []);
 
-  if (groqKeys.length === 0 && geminiKeys.length === 0) {
+  if (groqKeys.length === 0 && geminiKeys.length === 0 && cerebrasKeys.length === 0) {
     res.status(500).json({ error: 'No AI provider keys configured on server' });
     return;
   }
@@ -113,8 +146,8 @@ export default async function handler(req, res) {
   const { priority: _drop, ...bodyForProviders } = req.body;
 
   const providers = priority === 'quality'
-    ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }]
-    : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
+    ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }]
+    : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
 
   let lastResult = null;
   for (const p of providers) {
