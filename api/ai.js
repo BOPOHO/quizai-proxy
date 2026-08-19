@@ -133,35 +133,64 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
 
-  const groqKeys = loadKeys('GROQ_KEY');
-  const geminiKeys = loadKeys('GEMINI_KEY').length ? loadKeys('GEMINI_KEY') : (process.env.GEMINI_API_KEY ? [process.env.GEMINI_API_KEY] : []);
-  const cerebrasKeys = loadKeys('CEREBRAS_KEY').length ? loadKeys('CEREBRAS_KEY') : (process.env.CEREBRAS_API_KEY ? [process.env.CEREBRAS_API_KEY] : []);
-
-  if (groqKeys.length === 0 && geminiKeys.length === 0 && cerebrasKeys.length === 0) {
-    res.status(500).json({ error: 'No AI provider keys configured on server' });
-    return;
-  }
-
-  const priority = req.body.priority === 'quality' ? 'quality' : 'speed';
-  const { priority: _drop, ...bodyForProviders } = req.body;
-
-  const providers = priority === 'quality'
-    ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }]
-    : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
-
-  let lastResult = null;
-  for (const p of providers) {
-    if (!p.keys.length) continue;
-    const result = await p.fn(bodyForProviders, p.keys);
-    if (result.ok) {
-      res.setHeader('X-Provider-Used', result.providerUsed);
-      res.setHeader('X-Key-Index', String(result.keyIndex));
-      return res.status(200).json(result.data);
+  // Всё оборачиваем в try/catch, чтобы вместо "тихого" сбоя платформы
+  // (который клиент видит как непонятный 404) всегда возвращался
+  // осмысленный JSON с текстом ошибки.
+  try {
+    let parsedBody = req.body;
+    // На некоторых рантаймах req.body может прийти как сырая строка —
+    // подстрахуемся и распарсим вручную.
+    if (typeof parsedBody === 'string') {
+      try {
+        parsedBody = JSON.parse(parsedBody);
+      } catch (e) {
+        res.status(400).json({ error: 'Invalid JSON body: ' + e.message });
+        return;
+      }
     }
-    lastResult = result;
-  }
+    if (!parsedBody || typeof parsedBody !== 'object') {
+      res.status(400).json({ error: 'Missing or invalid JSON body' });
+      return;
+    }
 
-  res.status(lastResult?.status || 500).json({
-    error: 'All providers failed. Last error: ' + (lastResult?.error || 'unknown'),
-  });
+    const groqKeys = loadKeys('GROQ_KEY');
+    const geminiKeys = loadKeys('GEMINI_KEY').length ? loadKeys('GEMINI_KEY') : (process.env.GEMINI_API_KEY ? [process.env.GEMINI_API_KEY] : []);
+    const cerebrasKeys = loadKeys('CEREBRAS_KEY').length ? loadKeys('CEREBRAS_KEY') : (process.env.CEREBRAS_API_KEY ? [process.env.CEREBRAS_API_KEY] : []);
+
+    console.log('[ai.js] keys loaded — groq:', groqKeys.length, 'gemini:', geminiKeys.length, 'cerebras:', cerebrasKeys.length);
+
+    if (groqKeys.length === 0 && geminiKeys.length === 0 && cerebrasKeys.length === 0) {
+      res.status(500).json({ error: 'No AI provider keys configured on server' });
+      return;
+    }
+
+    const priority = parsedBody.priority === 'quality' ? 'quality' : 'speed';
+    const { priority: _drop, ...bodyForProviders } = parsedBody;
+
+    const providers = priority === 'quality'
+      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }]
+      : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
+
+    let lastResult = null;
+    for (const p of providers) {
+      if (!p.keys.length) continue;
+      console.log('[ai.js] trying provider:', p.name);
+      const result = await p.fn(bodyForProviders, p.keys);
+      if (result.ok) {
+        res.setHeader('X-Provider-Used', result.providerUsed);
+        res.setHeader('X-Key-Index', String(result.keyIndex));
+        res.status(200).json(result.data);
+        return;
+      }
+      console.log('[ai.js] provider failed:', p.name, result.error);
+      lastResult = result;
+    }
+
+    res.status(lastResult?.status || 500).json({
+      error: 'All providers failed. Last error: ' + (lastResult?.error || 'unknown'),
+    });
+  } catch (e) {
+    console.error('[ai.js] UNCAUGHT ERROR:', e);
+    res.status(500).json({ error: 'Unhandled server error: ' + (e?.message || String(e)) });
+  }
 }
