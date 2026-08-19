@@ -72,6 +72,11 @@ async function tryCerebras(body, keys) {
   return { ok: false, error: lastError, status: lastStatus };
 }
 
+// ⚠️ ВАЖНО: у Google модели периодически "умирают" (deprecation).
+// Если тут снова начнёт сыпаться "no longer available" / 404 — поменяйте
+// GEMINI_MODEL ниже на актуальное имя из https://ai.google.dev/gemini-api/docs/models
+const GEMINI_MODEL = 'gemini-3.5-flash-lite';
+
 async function tryGemini(body, keys) {
   const geminiMessages = body.messages || [];
   const systemMsg = geminiMessages.find(m => m.role === 'system')?.content || '';
@@ -84,9 +89,8 @@ async function tryGemini(body, keys) {
   let lastError = null, lastStatus = null;
   for (let i = 0; i < keys.length; i++) {
     try {
-      // gemini-2.0-flash отключена Google 1 июня 2026 — используем актуальную замену
       const gRes = await fetch(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + keys[i],
+        'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent?key=' + keys[i],
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -100,18 +104,34 @@ async function tryGemini(body, keys) {
           })
         }
       );
+
+      const gData = await gRes.json().catch(() => null);
+      const text = gData?.candidates?.[0]?.content?.parts?.[0]?.text;
+      const rawMsg = gData?.error?.message || '';
+      const modelDead = gRes.status === 404 && /no longer available|not found|not supported/i.test(rawMsg);
+
       if (gRes.status === 429 || gRes.status >= 500) {
         lastError = 'Gemini HTTP ' + gRes.status + ' on key #' + (i + 1);
         lastStatus = gRes.status;
         continue;
       }
-      const gData = await gRes.json();
-      const text = gData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      // Модель отключена Google — это не проблема ключа, нет смысла
+      // перебирать остальные ключи этим же мёртвым именем модели.
+      if (modelDead) {
+        lastError = 'Gemini model "' + GEMINI_MODEL + '" is deprecated by Google: ' + rawMsg.slice(0, 200);
+        lastStatus = 502; // не пробрасываем чужой 404 как свой — это не "роут не найден"
+        break;
+      }
+
       if (!gRes.ok || !text) {
         lastError = 'Gemini HTTP ' + gRes.status + ' on key #' + (i + 1) + ': ' + JSON.stringify(gData).slice(0, 200);
-        lastStatus = gRes.status;
+        // Любую прочую ошибку тоже не отдаём клиенту как есть, если это 4xx
+        // не из нашего собственного роутинга — переводим в 502.
+        lastStatus = gRes.status >= 400 && gRes.status < 500 ? 502 : gRes.status;
         continue;
       }
+
       return {
         ok: true,
         data: { choices: [{ message: { content: text } }] },
@@ -120,6 +140,7 @@ async function tryGemini(body, keys) {
       };
     } catch (e) {
       lastError = 'Gemini network error on key #' + (i + 1) + ': ' + e.message;
+      lastStatus = 502;
       continue;
     }
   }
@@ -138,8 +159,6 @@ export default async function handler(req, res) {
   // осмысленный JSON с текстом ошибки.
   try {
     let parsedBody = req.body;
-    // На некоторых рантаймах req.body может прийти как сырая строка —
-    // подстрахуемся и распарсим вручную.
     if (typeof parsedBody === 'string') {
       try {
         parsedBody = JSON.parse(parsedBody);
@@ -186,7 +205,15 @@ export default async function handler(req, res) {
       lastResult = result;
     }
 
-    res.status(lastResult?.status || 500).json({
+    // ВАЖНО: НИКОГДА не пробрасываем 404 клиенту как есть — на нашем
+    // роуте 404 означает ровно одно: "такого пути не существует". Если
+    // последний провайдер вернул 404 (например, модель у него отключена),
+    // это чужая ошибка, а не наша — превращаем в 502, чтобы не путать
+    // с "роут не найден" на фронте.
+    let statusToClient = lastResult?.status || 500;
+    if (statusToClient === 404) statusToClient = 502;
+
+    res.status(statusToClient).json({
       error: 'All providers failed. Last error: ' + (lastResult?.error || 'unknown'),
     });
   } catch (e) {
