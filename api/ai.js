@@ -19,7 +19,11 @@ async function tryGroq(body, keys) {
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keys[i] },
-        body: JSON.stringify(body),
+        // response_format:json_object примушує модель віддавати СИНТАКСИЧНО
+        // валідний JSON (правильне екранування лапок тощо) — без цього
+        // модель іноді забуває заескейпити " всередині тексту питання, і
+        // JSON.parse на фронті падає з "Expected ':' after property name".
+        body: JSON.stringify({ ...body, response_format: { type: 'json_object' } }),
       });
       if (response.status === 429 || response.status >= 500) {
         lastError = 'Groq HTTP ' + response.status + ' on key #' + (i + 1);
@@ -50,7 +54,7 @@ async function tryCerebras(body, keys) {
       const response = await fetch('https://api.cerebras.ai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keys[i] },
-        body: JSON.stringify({ ...body, model: 'llama-3.3-70b' }),
+        body: JSON.stringify({ ...body, model: 'llama-3.3-70b', response_format: { type: 'json_object' } }),
       });
       if (response.status === 429 || response.status >= 500) {
         lastError = 'Cerebras HTTP ' + response.status + ' on key #' + (i + 1);
@@ -99,7 +103,8 @@ async function tryGemini(body, keys) {
             contents,
             generationConfig: {
               temperature: body.temperature ?? 0.5,
-              maxOutputTokens: body.max_tokens ?? 1000
+              maxOutputTokens: body.max_tokens ?? 1000,
+              responseMimeType: 'application/json'
             }
           })
         }
