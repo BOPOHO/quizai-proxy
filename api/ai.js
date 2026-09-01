@@ -3,6 +3,17 @@
 // priority: "quality" — сначала Gemini, потом Cerebras, потом Groq (для генерации теста)
 // priority: "speed"   — сначала Groq, потом Cerebras, потом Gemini (для проверки ответов ученика в реальном времени)
 
+// Base64-аудіо для транскрипції (Whisper) важче, ніж звичайний JSON з
+// текстом — дефолтний ліміт Vercel body parser (1mb) занадто малий для
+// довшої диктовки. Піднімаємо до 10mb (~7 хвилин webm/opus аудіо).
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '10mb',
+    },
+  },
+};
+
 function loadKeys(prefix) {
   const keys = [];
   for (let i = 1; i <= 30; i++) {
@@ -152,6 +163,44 @@ async function tryGemini(body, keys) {
   return { ok: false, error: lastError, status: lastStatus };
 }
 
+async function tryGroqWhisper(audioBuffer, mimeType, keys, language) {
+  let lastError = null, lastStatus = null;
+  const ext = mimeType.includes('webm') ? 'webm'
+    : mimeType.includes('mp4') ? 'mp4'
+    : mimeType.includes('ogg') ? 'ogg'
+    : mimeType.includes('wav') ? 'wav'
+    : 'webm';
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      const form = new FormData();
+      form.append('file', new Blob([audioBuffer], { type: mimeType }), 'audio.' + ext);
+      form.append('model', 'whisper-large-v3-turbo');
+      if (language) form.append('language', language);
+      const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + keys[i] },
+        body: form,
+      });
+      if (response.status === 429 || response.status >= 500) {
+        lastError = 'Groq Whisper HTTP ' + response.status + ' on key #' + (i + 1);
+        lastStatus = response.status;
+        continue;
+      }
+      const data = await response.json();
+      if (!response.ok) {
+        lastError = 'Groq Whisper HTTP ' + response.status + ' on key #' + (i + 1) + ': ' + JSON.stringify(data).slice(0, 200);
+        lastStatus = response.status;
+        continue;
+      }
+      return { ok: true, text: data.text || '', keyIndex: i + 1 };
+    } catch (e) {
+      lastError = 'Groq Whisper network error on key #' + (i + 1) + ': ' + e.message;
+      continue;
+    }
+  }
+  return { ok: false, error: lastError, status: lastStatus };
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -174,6 +223,40 @@ export default async function handler(req, res) {
     }
     if (!parsedBody || typeof parsedBody !== 'object') {
       res.status(400).json({ error: 'Missing or invalid JSON body' });
+      return;
+    }
+
+    // Транскрипція диктовки (Groq Whisper) — окрема гілка, не chat-completion.
+    // Фронтенд шле base64-аудіо замість messages, коли учень натиснув "стоп"
+    // на мікрофоні: живий Web Speech API вже показав текст одразу, а тут ми
+    // підмінюємо його на точнішу версію від Whisper.
+    if (parsedBody.audio_base64) {
+      const groqKeys = loadKeys('GROQ_KEY');
+      if (!groqKeys.length) {
+        res.status(500).json({ error: 'No Groq keys configured for transcription' });
+        return;
+      }
+      let audioBuffer;
+      try {
+        audioBuffer = Buffer.from(parsedBody.audio_base64, 'base64');
+      } catch (e) {
+        res.status(400).json({ error: 'Invalid audio_base64' });
+        return;
+      }
+      if (!audioBuffer.length) {
+        res.status(400).json({ error: 'Empty audio' });
+        return;
+      }
+      const mimeType = parsedBody.mime_type || 'audio/webm';
+      const language = parsedBody.language || undefined;
+      const result = await tryGroqWhisper(audioBuffer, mimeType, groqKeys, language);
+      if (result.ok) {
+        res.status(200).json({ text: result.text });
+        return;
+      }
+      let statusToClient = result.status || 500;
+      if (statusToClient === 404) statusToClient = 502;
+      res.status(statusToClient).json({ error: 'Transcription failed: ' + (result.error || 'unknown') });
       return;
     }
 
