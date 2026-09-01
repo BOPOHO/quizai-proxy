@@ -96,10 +96,25 @@ async function tryGemini(body, keys) {
   const geminiMessages = body.messages || [];
   const systemMsg = geminiMessages.find(m => m.role === 'system')?.content || '';
   const userMsgs = geminiMessages.filter(m => m.role !== 'system');
-  const contents = userMsgs.map(m => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }]
-  }));
+  // Algebra Pack шлёт body.images — масив base64 (без data: префіксу) +
+  // mime_type. Це фото зошита учня і/або сторінки підручника. Вкладаємо
+  // їх inline_data в ОСТАННЄ user-повідомлення, бо саме там просимо
+  // порівняти фото з еталоном.
+  const images = Array.isArray(body.images) ? body.images : [];
+  const contents = userMsgs.map((m, idx) => {
+    const parts = [{ text: m.content }];
+    if (idx === userMsgs.length - 1 && images.length) {
+      for (const img of images) {
+        if (img && img.data) {
+          parts.push({ inline_data: { mime_type: img.mime_type || 'image/jpeg', data: img.data } });
+        }
+      }
+    }
+    return {
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts
+    };
+  });
 
   let lastError = null, lastStatus = null;
   for (let i = 0; i < keys.length; i++) {
@@ -274,7 +289,19 @@ export default async function handler(req, res) {
     const priority = parsedBody.priority === 'quality' ? 'quality' : 'speed';
     const { priority: _drop, ...bodyForProviders } = parsedBody;
 
-    const providers = priority === 'quality'
+    // Groq (llama/gpt-oss) і Cerebras тут не приймають зображення — якщо
+    // прийшли images, немає сенсу спочатку бити в них і чекати provider
+    // fail, одразу йдемо в Gemini. Якщо в Gemini немає ключів — чесна
+    // помилка, а не мовчазна текстова "перевірка" без фото.
+    const hasImages = Array.isArray(bodyForProviders.images) && bodyForProviders.images.length > 0;
+    if (hasImages && geminiKeys.length === 0) {
+      res.status(500).json({ error: 'Image input requires Gemini API key, none configured on server' });
+      return;
+    }
+
+    const providers = hasImages
+      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }]
+      : priority === 'quality'
       ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }]
       : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
 
