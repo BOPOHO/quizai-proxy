@@ -178,6 +178,77 @@ async function tryGemini(body, keys) {
   return { ok: false, error: lastError, status: lastStatus };
 }
 
+// Qwen2.5-VL-72B через OpenRouter (безкоштовний тір) — навмисно ІНШИЙ
+// провайдер, не Gemini вдруге. Використовується як другий незалежний
+// прохід у dual-pass верифікації Algebra Pack: якщо ОБИДВА проходи на
+// Gemini синхронно помиляються в одному й тому ж місці (систематична
+// помилка читання конкретного почерку), Gemini+Gemini не зловить
+// розбіжність. Різний провайдер має інші "сліпі плями" — не гарантія,
+// але знижує шанс саме синхронної помилки. OpenAI-сумісний API, тому
+// формат запиту схожий на Groq/Cerebras, а не на Gemini.
+async function tryQwenVision(body, keys) {
+  const qMessages = body.messages || [];
+  const images = Array.isArray(body.images) ? body.images : [];
+  const openaiMessages = qMessages.map((m, idx) => {
+    const isLastUser = m.role !== 'system' && idx === qMessages.length - 1;
+    if (isLastUser && images.length) {
+      const content = [{ type: 'text', text: m.content }];
+      for (const img of images) {
+        if (img && img.data) {
+          content.push({ type: 'image_url', image_url: { url: `data:${img.mime_type || 'image/jpeg'};base64,${img.data}` } });
+        }
+      }
+      return { role: m.role, content };
+    }
+    return { role: m.role, content: m.content };
+  });
+
+  let lastError = null, lastStatus = null;
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      const qRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + keys[i],
+        },
+        body: JSON.stringify({
+          model: 'qwen/qwen2.5-vl-72b-instruct:free',
+          messages: openaiMessages,
+          max_tokens: body.max_tokens ?? 1000,
+          temperature: body.temperature ?? 0.5,
+        }),
+      });
+
+      const qData = await qRes.json().catch(() => null);
+      const text = qData?.choices?.[0]?.message?.content;
+
+      if (qRes.status === 429 || qRes.status >= 500) {
+        lastError = 'Qwen HTTP ' + qRes.status + ' on key #' + (i + 1);
+        lastStatus = qRes.status;
+        continue;
+      }
+      if (!qRes.ok || !text) {
+        lastError = 'Qwen HTTP ' + qRes.status + ' on key #' + (i + 1) + ': ' + JSON.stringify(qData).slice(0, 200);
+        lastStatus = qRes.status >= 400 && qRes.status < 500 ? 502 : qRes.status;
+        continue;
+      }
+
+      return {
+        ok: true,
+        data: { choices: [{ message: { content: text } }] },
+        providerUsed: 'qwen',
+        keyIndex: i + 1
+      };
+    } catch (e) {
+      lastError = 'Qwen network error on key #' + (i + 1) + ': ' + e.message;
+      lastStatus = 502;
+      continue;
+    }
+  }
+  return { ok: false, error: lastError, status: lastStatus };
+}
+
 async function tryGroqWhisper(audioBuffer, mimeType, keys, language) {
   let lastError = null, lastStatus = null;
   const ext = mimeType.includes('webm') ? 'webm'
@@ -278,8 +349,9 @@ export default async function handler(req, res) {
     const groqKeys = loadKeys('GROQ_KEY');
     const geminiKeys = loadKeys('GEMINI_KEY').length ? loadKeys('GEMINI_KEY') : (process.env.GEMINI_API_KEY ? [process.env.GEMINI_API_KEY] : []);
     const cerebrasKeys = loadKeys('CEREBRAS_KEY').length ? loadKeys('CEREBRAS_KEY') : (process.env.CEREBRAS_API_KEY ? [process.env.CEREBRAS_API_KEY] : []);
+    const openrouterKeys = loadKeys('OPENROUTER_KEY').length ? loadKeys('OPENROUTER_KEY') : (process.env.OPENROUTER_API_KEY ? [process.env.OPENROUTER_API_KEY] : []);
 
-    console.log('[ai.js] keys loaded — groq:', groqKeys.length, 'gemini:', geminiKeys.length, 'cerebras:', cerebrasKeys.length);
+    console.log('[ai.js] keys loaded — groq:', groqKeys.length, 'gemini:', geminiKeys.length, 'cerebras:', cerebrasKeys.length, 'openrouter:', openrouterKeys.length);
 
     if (groqKeys.length === 0 && geminiKeys.length === 0 && cerebrasKeys.length === 0) {
       res.status(500).json({ error: 'No AI provider keys configured on server' });
@@ -294,13 +366,21 @@ export default async function handler(req, res) {
     // fail, одразу йдемо в Gemini. Якщо в Gemini немає ключів — чесна
     // помилка, а не мовчазна текстова "перевірка" без фото.
     const hasImages = Array.isArray(bodyForProviders.images) && bodyForProviders.images.length > 0;
-    if (hasImages && geminiKeys.length === 0) {
-      res.status(500).json({ error: 'Image input requires Gemini API key, none configured on server' });
+    if (hasImages && geminiKeys.length === 0 && openrouterKeys.length === 0) {
+      res.status(500).json({ error: 'Image input requires Gemini or OpenRouter API key, none configured on server' });
       return;
     }
 
-    const providers = hasImages
-      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }]
+    // model: 'qwen-vision' — явний запит на ІНШОГО провайдера для vision,
+    // не Gemini. Algebra Pack шле це саме для другого (верифікаційного)
+    // проходу — щоб не звіряти Gemini сама з собою, а мати справді
+    // незалежну думку з іншої моделі. Fallback на Gemini, якщо в
+    // OpenRouter немає ключів або безкоштовний тір впав — краще
+    // відповідь від того ж провайдера, ніж взагалі ніякої.
+    const providers = bodyForProviders.model === 'qwen-vision'
+      ? [{ name: 'qwen', fn: tryQwenVision, keys: openrouterKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
+      : hasImages
+      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'qwen', fn: tryQwenVision, keys: openrouterKeys }]
       : priority === 'quality'
       ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }]
       : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
