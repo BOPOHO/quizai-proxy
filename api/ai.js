@@ -249,6 +249,80 @@ async function tryQwenVision(body, keys) {
   return { ok: false, error: lastError, status: lastStatus };
 }
 
+// Pixtral (Mistral) — ПРЯМИЙ API, не через посередника типу OpenRouter.
+// На відміну від безкоштовних моделей через OpenRouter (де training/logging
+// треба явно вмикати навіть щоб просто скористатись безкоштовною моделлю),
+// у Mistral є СПРАВЖНІЙ перемикач "не навчайся на моїх даних" у налаштуваннях
+// консолі (console.mistral.ai → Privacy), який реально можна вимкнути, не
+// втрачаючи доступ до безкоштовного тіру. Використовується як другий,
+// ІНШИЙ від Gemini, незалежний прохід верифікації в Algebra Pack.
+async function tryMistralVision(body, keys) {
+  const mMessages = body.messages || [];
+  const images = Array.isArray(body.images) ? body.images : [];
+  const openaiMessages = mMessages.map((m, idx) => {
+    const isLastUser = m.role !== 'system' && idx === mMessages.length - 1;
+    if (isLastUser && images.length) {
+      const content = [{ type: 'text', text: m.content }];
+      for (const img of images) {
+        if (img && img.data) {
+          content.push({ type: 'image_url', image_url: `data:${img.mime_type || 'image/jpeg'};base64,${img.data}` });
+        }
+      }
+      return { role: m.role, content };
+    }
+    return { role: m.role, content: m.content };
+  });
+
+  let lastError = null, lastStatus = null;
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      const mRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + keys[i],
+        },
+        body: JSON.stringify({
+          // ВАЖЛИВО: перевір актуальну назву vision-моделі в console.mistral.ai
+          // перед деплоєм — Mistral перейменовує/об'єднує моделі (Pixtral →
+          // Small 4 з березня 2026). 'pixtral-large-latest' — задокументований
+          // alias на момент написання, але міг змінитись.
+          model: process.env.MISTRAL_VISION_MODEL || 'pixtral-large-latest',
+          messages: openaiMessages,
+          max_tokens: body.max_tokens ?? 1000,
+          temperature: body.temperature ?? 0.5,
+        }),
+      });
+
+      const mData = await mRes.json().catch(() => null);
+      const text = mData?.choices?.[0]?.message?.content;
+
+      if (mRes.status === 429 || mRes.status >= 500) {
+        lastError = 'Mistral HTTP ' + mRes.status + ' on key #' + (i + 1);
+        lastStatus = mRes.status;
+        continue;
+      }
+      if (!mRes.ok || !text) {
+        lastError = 'Mistral HTTP ' + mRes.status + ' on key #' + (i + 1) + ': ' + JSON.stringify(mData).slice(0, 200);
+        lastStatus = mRes.status >= 400 && mRes.status < 500 ? 502 : mRes.status;
+        continue;
+      }
+
+      return {
+        ok: true,
+        data: { choices: [{ message: { content: text } }] },
+        providerUsed: 'mistral',
+        keyIndex: i + 1
+      };
+    } catch (e) {
+      lastError = 'Mistral network error on key #' + (i + 1) + ': ' + e.message;
+      lastStatus = 502;
+      continue;
+    }
+  }
+  return { ok: false, error: lastError, status: lastStatus };
+}
+
 async function tryGroqWhisper(audioBuffer, mimeType, keys, language) {
   let lastError = null, lastStatus = null;
   const ext = mimeType.includes('webm') ? 'webm'
@@ -350,8 +424,9 @@ export default async function handler(req, res) {
     const geminiKeys = loadKeys('GEMINI_KEY').length ? loadKeys('GEMINI_KEY') : (process.env.GEMINI_API_KEY ? [process.env.GEMINI_API_KEY] : []);
     const cerebrasKeys = loadKeys('CEREBRAS_KEY').length ? loadKeys('CEREBRAS_KEY') : (process.env.CEREBRAS_API_KEY ? [process.env.CEREBRAS_API_KEY] : []);
     const openrouterKeys = loadKeys('OPENROUTER_KEY').length ? loadKeys('OPENROUTER_KEY') : (process.env.OPENROUTER_API_KEY ? [process.env.OPENROUTER_API_KEY] : []);
+    const mistralKeys = loadKeys('MISTRAL_KEY').length ? loadKeys('MISTRAL_KEY') : (process.env.MISTRAL_API_KEY ? [process.env.MISTRAL_API_KEY] : []);
 
-    console.log('[ai.js] keys loaded — groq:', groqKeys.length, 'gemini:', geminiKeys.length, 'cerebras:', cerebrasKeys.length, 'openrouter:', openrouterKeys.length);
+    console.log('[ai.js] keys loaded — groq:', groqKeys.length, 'gemini:', geminiKeys.length, 'cerebras:', cerebrasKeys.length, 'openrouter:', openrouterKeys.length, 'mistral:', mistralKeys.length);
 
     if (groqKeys.length === 0 && geminiKeys.length === 0 && cerebrasKeys.length === 0) {
       res.status(500).json({ error: 'No AI provider keys configured on server' });
@@ -366,21 +441,25 @@ export default async function handler(req, res) {
     // fail, одразу йдемо в Gemini. Якщо в Gemini немає ключів — чесна
     // помилка, а не мовчазна текстова "перевірка" без фото.
     const hasImages = Array.isArray(bodyForProviders.images) && bodyForProviders.images.length > 0;
-    if (hasImages && geminiKeys.length === 0 && openrouterKeys.length === 0) {
-      res.status(500).json({ error: 'Image input requires Gemini or OpenRouter API key, none configured on server' });
+    if (hasImages && geminiKeys.length === 0 && openrouterKeys.length === 0 && mistralKeys.length === 0) {
+      res.status(500).json({ error: 'Image input requires Gemini, Mistral or OpenRouter API key, none configured on server' });
       return;
     }
 
-    // model: 'qwen-vision' — явний запит на ІНШОГО провайдера для vision,
+    // model: 'mistral-vision' — явний запит на ІНШОГО провайдера для vision,
     // не Gemini. Algebra Pack шле це саме для другого (верифікаційного)
     // проходу — щоб не звіряти Gemini сама з собою, а мати справді
-    // незалежну думку з іншої моделі. Fallback на Gemini, якщо в
-    // OpenRouter немає ключів або безкоштовний тір впав — краще
-    // відповідь від того ж провайдера, ніж взагалі ніякої.
-    const providers = bodyForProviders.model === 'qwen-vision'
+    // незалежну думку з іншої моделі (у Mistral є чесний перемикач
+    // "не навчатись на моїх даних", на відміну від безкоштовних моделей
+    // через OpenRouter). Fallback на Gemini, якщо в Mistral немає ключів.
+    // model: 'qwen-vision' лишається доступним про запас, якщо колись
+    // знадобиться повернутись до нього.
+    const providers = bodyForProviders.model === 'mistral-vision'
+      ? [{ name: 'mistral', fn: tryMistralVision, keys: mistralKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
+      : bodyForProviders.model === 'qwen-vision'
       ? [{ name: 'qwen', fn: tryQwenVision, keys: openrouterKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       : hasImages
-      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'qwen', fn: tryQwenVision, keys: openrouterKeys }]
+      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'mistral', fn: tryMistralVision, keys: mistralKeys }]
       : priority === 'quality'
       ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }]
       : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
