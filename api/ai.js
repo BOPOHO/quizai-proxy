@@ -25,16 +25,6 @@ function loadKeys(prefix) {
 
 async function tryGroq(body, keys) {
   let lastError = null, lastStatus = null;
-  // gpt-oss-моделі на Groq — reasoning-моделі: перед відповіддю "думають"
-  // (reasoning_tokens), і саме це, а не мережа/фоллбек, з'їдає 10-16с на
-  // виклик. reasoning_effort напряму керує глибиною цього роздуму.
-  // "low" різко скорочує час, зберігаючи прийнятну якість — це не
-  // "дешевша модель", той самий gpt-oss-120b, просто менше токенів на
-  // роздуми. Якщо викликач сам передав reasoning_effort — не чіпаємо.
-  const groqBody = { ...body, response_format: { type: 'json_object' } };
-  if (typeof groqBody.model === 'string' && groqBody.model.startsWith('openai/gpt-oss') && !groqBody.reasoning_effort) {
-    groqBody.reasoning_effort = 'low';
-  }
   for (let i = 0; i < keys.length; i++) {
     try {
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -44,7 +34,7 @@ async function tryGroq(body, keys) {
         // валідний JSON (правильне екранування лапок тощо) — без цього
         // модель іноді забуває заескейпити " всередині тексту питання, і
         // JSON.parse на фронті падає з "Expected ':' after property name".
-        body: JSON.stringify(groqBody),
+        body: JSON.stringify({ ...body, response_format: { type: 'json_object' } }),
       });
       if (response.status === 429 || response.status >= 500) {
         lastError = 'Groq HTTP ' + response.status + ' on key #' + (i + 1);
