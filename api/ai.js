@@ -29,7 +29,7 @@ function loadKeys(prefix) {
 // і нічого". PROVIDER_TIMEOUT_MS обмежує очікування одного провайдера —
 // якщо не встиг, вважаємо це помилкою цього провайдера і йдемо до
 // наступного в ланцюжку, а не висимо назавжди.
-const PROVIDER_TIMEOUT_MS = 25000;
+const PROVIDER_TIMEOUT_MS = 15000;
 
 async function fetchWithTimeout(url, options, timeoutMs = PROVIDER_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -478,8 +478,14 @@ export default async function handler(req, res) {
       ? [{ name: 'qwen', fn: tryQwenVision, keys: openrouterKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       : hasImages
       ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'mistral', fn: tryMistralVision, keys: mistralKeys }]
+      // ТИМЧАСОВО (4 вер. 2026, після масового збою Gemini API 3 вер.):
+      // "quality" тепер НЕ ставить Gemini першим. Навіть з таймаутом він
+      // забирає до хвилини на запит, поки Google не стабілізується — це
+      // множиться на 3 послідовні виклики (generate+factCheck+autofix) і
+      // робить продукт непридатним для використання. Groq зараз стабільно
+      // швидкий (2-3с). Коли Gemini відновиться — поверніть його першим.
       : priority === 'quality'
-      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }]
+      ? [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
 
     let lastResult = null;
