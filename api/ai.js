@@ -23,11 +23,29 @@ function loadKeys(prefix) {
   return keys;
 }
 
+// Жоден provider раніше не мав таймауту на fetch — якщо провайдер завис
+// (не відповів ні успіхом, ні помилкою), сервер чекав НЕСКІНЧЕННО довго,
+// поки Vercel сам не вб'є функцію. Звідси "крутиться кружечок 2+ хвилини
+// і нічого". PROVIDER_TIMEOUT_MS обмежує очікування одного провайдера —
+// якщо не встиг, вважаємо це помилкою цього провайдера і йдемо до
+// наступного в ланцюжку, а не висимо назавжди.
+const PROVIDER_TIMEOUT_MS = 25000;
+
+async function fetchWithTimeout(url, options, timeoutMs = PROVIDER_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function tryGroq(body, keys) {
   let lastError = null, lastStatus = null;
   for (let i = 0; i < keys.length; i++) {
     try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const response = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keys[i] },
         // response_format:json_object примушує модель віддавати СИНТАКСИЧНО
@@ -49,7 +67,7 @@ async function tryGroq(body, keys) {
       }
       return { ok: true, data, providerUsed: 'groq', keyIndex: i + 1 };
     } catch (e) {
-      lastError = 'Groq network error on key #' + (i + 1) + ': ' + e.message;
+      lastError = 'Groq network error on key #' + (i + 1) + (e.name === 'AbortError' ? ' (timeout > ' + PROVIDER_TIMEOUT_MS + 'ms)' : ': ' + e.message);
       continue;
     }
   }
@@ -62,7 +80,7 @@ async function tryCerebras(body, keys) {
   let lastError = null, lastStatus = null;
   for (let i = 0; i < keys.length; i++) {
     try {
-      const response = await fetch('https://api.cerebras.ai/v1/chat/completions', {
+      const response = await fetchWithTimeout('https://api.cerebras.ai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keys[i] },
         body: JSON.stringify({ ...body, model: 'llama-3.3-70b', response_format: { type: 'json_object' } }),
@@ -80,7 +98,7 @@ async function tryCerebras(body, keys) {
       }
       return { ok: true, data, providerUsed: 'cerebras', keyIndex: i + 1 };
     } catch (e) {
-      lastError = 'Cerebras network error on key #' + (i + 1) + ': ' + e.message;
+      lastError = 'Cerebras network error on key #' + (i + 1) + (e.name === 'AbortError' ? ' (timeout > ' + PROVIDER_TIMEOUT_MS + 'ms)' : ': ' + e.message);
       continue;
     }
   }
@@ -119,7 +137,7 @@ async function tryGemini(body, keys) {
   let lastError = null, lastStatus = null;
   for (let i = 0; i < keys.length; i++) {
     try {
-      const gRes = await fetch(
+      const gRes = await fetchWithTimeout(
         'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent?key=' + keys[i],
         {
           method: 'POST',
@@ -170,7 +188,7 @@ async function tryGemini(body, keys) {
         keyIndex: i + 1
       };
     } catch (e) {
-      lastError = 'Gemini network error on key #' + (i + 1) + ': ' + e.message;
+      lastError = 'Gemini network error on key #' + (i + 1) + (e.name === 'AbortError' ? ' (timeout > ' + PROVIDER_TIMEOUT_MS + 'ms)' : ': ' + e.message);
       lastStatus = 502;
       continue;
     }
