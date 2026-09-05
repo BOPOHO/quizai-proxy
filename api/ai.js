@@ -451,7 +451,7 @@ export default async function handler(req, res) {
       return;
     }
 
-    const priority = parsedBody.priority === 'quality' ? 'quality' : 'speed';
+    const priority = parsedBody.priority === 'quality_deep' ? 'quality_deep' : parsedBody.priority === 'quality' ? 'quality' : 'speed';
     const { priority: _drop, ...bodyForProviders } = parsedBody;
 
     // Groq (llama/gpt-oss) і Cerebras тут не приймають зображення — якщо
@@ -479,13 +479,19 @@ export default async function handler(req, res) {
       : hasImages
       ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'mistral', fn: tryMistralVision, keys: mistralKeys }]
       // ТИМЧАСОВО (4 вер. 2026, після масового збою Gemini API 3 вер.):
-      // "quality" тепер НЕ ставить Gemini першим. Навіть з таймаутом він
-      // забирає до хвилини на запит, поки Google не стабілізується — це
-      // множиться на 3 послідовні виклики (generate+factCheck+autofix) і
-      // робить продукт непридатним для використання. Groq зараз стабільно
-      // швидкий (2-3с). Коли Gemini відновиться — поверніть його першим.
-      : priority === 'quality'
+      // "quality" (за замовчуванням у вчителя, перемикач ВИМКНЕНО) —
+      // Cerebras ПЕРШИЙ. У Cerebras модель захардкожена на llama-3.3-70b
+      // (звичайна, НЕ reasoning-модель — саме та швидка "ллама", на якій
+      // тести раніше створювались за 10-14с). Простіші, менш нюансовані
+      // питання — свідомий компроміс.
+      // "quality_deep" (перемикач "Якісніше (довше)" УВІМКНЕНО вчителем) —
+      // Groq (gpt-oss-120b, reasoning) ПЕРШИЙ — довше "думає", але якісніше
+      // формулює/перевіряє питання. Gemini лишається останнім в обох
+      // режимах, поки не стабілізується після збою.
+      : priority === 'quality_deep'
       ? [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
+      : priority === 'quality'
+      ? [{ name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
 
     let lastResult = null;
