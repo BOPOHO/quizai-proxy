@@ -224,7 +224,7 @@ async function tryQwenVision(body, keys) {
   let lastError = null, lastStatus = null;
   for (let i = 0; i < keys.length; i++) {
     try {
-      const qRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const qRes = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -259,7 +259,7 @@ async function tryQwenVision(body, keys) {
         keyIndex: i + 1
       };
     } catch (e) {
-      lastError = 'Qwen network error on key #' + (i + 1) + ': ' + e.message;
+      lastError = 'Qwen network error on key #' + (i + 1) + (e.name === 'AbortError' ? ' (timeout > ' + PROVIDER_TIMEOUT_MS + 'ms)' : ': ' + e.message);
       lastStatus = 502;
       continue;
     }
@@ -294,7 +294,7 @@ async function tryMistralVision(body, keys) {
   let lastError = null, lastStatus = null;
   for (let i = 0; i < keys.length; i++) {
     try {
-      const mRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
+      const mRes = await fetchWithTimeout('https://api.mistral.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -333,7 +333,7 @@ async function tryMistralVision(body, keys) {
         keyIndex: i + 1
       };
     } catch (e) {
-      lastError = 'Mistral network error on key #' + (i + 1) + ': ' + e.message;
+      lastError = 'Mistral network error on key #' + (i + 1) + (e.name === 'AbortError' ? ' (timeout > ' + PROVIDER_TIMEOUT_MS + 'ms)' : ': ' + e.message);
       lastStatus = 502;
       continue;
     }
@@ -464,20 +464,21 @@ export default async function handler(req, res) {
       return;
     }
 
-    // model: 'mistral-vision' — явний запит на ІНШОГО провайдера для vision,
-    // не Gemini. Algebra Pack шле це саме для другого (верифікаційного)
-    // проходу — щоб не звіряти Gemini сама з собою, а мати справді
-    // незалежну думку з іншої моделі (у Mistral є чесний перемикач
-    // "не навчатись на моїх даних", на відміну від безкоштовних моделей
-    // через OpenRouter). Fallback на Gemini, якщо в Mistral немає ключів.
+    // model: 'mistral-vision' — ТИМЧАСОВО (вересень 2026) Mistral вимкнено
+    // вчителем: невірна/застаріла назва моделі на його акаунті, працювати
+    // все одно не буде. Йдемо ОДРАЗУ на Gemini, без жодної спроби Mistral —
+    // раніше саме ці зависання спроб додавали 45-60с мертвого часу на
+    // кожну перевірку. Щоб повернути Mistral — поверни 'mistral' першим
+    // елементом в обох гілках нижче (masistral-vision і hasImages) і
+    // перевір актуальну назву моделі в console.mistral.ai.
     // model: 'qwen-vision' лишається доступним про запас, якщо колись
     // знадобиться повернутись до нього.
     const providers = bodyForProviders.model === 'mistral-vision'
-      ? [{ name: 'mistral', fn: tryMistralVision, keys: mistralKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
+      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       : bodyForProviders.model === 'qwen-vision'
       ? [{ name: 'qwen', fn: tryQwenVision, keys: openrouterKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       : hasImages
-      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'mistral', fn: tryMistralVision, keys: mistralKeys }]
+      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       // ТИМЧАСОВО (4 вер. 2026, після масового збою Gemini API 3 вер.):
       // "quality" (за замовчуванням у вчителя, перемикач ВИМКНЕНО) —
       // Cerebras ПЕРШИЙ. У Cerebras модель захардкожена на llama-3.3-70b
