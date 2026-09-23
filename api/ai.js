@@ -465,21 +465,20 @@ export default async function handler(req, res) {
       return;
     }
 
-    // model: 'mistral-vision' — ТЕСТ (вересень 2026): назву моделі
-    // полагоджено на 'mistral-medium-3-5' (pixtral-large-latest була
-    // deprecated). Учитель поки НЕ поповнював баланс Mistral навмисно —
-    // якщо квота/оплата вичерпається, tryMistralVision впаде з помилкою
-    // (429/402) швидко, і код одразу піде на Gemini-fallback нижче.
-    // Якщо після цього тесту знову вимикати Mistral — прибери 'mistral' з
-    // обох гілок (mistral-vision і hasImages), лишивши тільки gemini.
+    // model: 'mistral-vision' — ВИМКНЕНО ЗНОВУ (23 вер. 2026): тест показав
+    // хибну знахідку ("slouching" нібито відсутнє в тексті, хоча воно там
+    // дослівно є) — вчитель попросив прибрати Mistral. ВАЖЛИВО: сама ця
+    // знахідка НЕ доведено, що від Mistral (second_pass міг впасти на
+    // Mistral і піти на Gemini-fallback, тому винуватець невідомий), і
+    // йдемо одразу на Gemini без спроби Mistral.
     // model: 'qwen-vision' лишається доступним про запас, якщо колись
     // знадобиться повернутись до нього.
     const providers = bodyForProviders.model === 'mistral-vision'
-      ? [{ name: 'mistral', fn: tryMistralVision, keys: mistralKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
+      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       : bodyForProviders.model === 'qwen-vision'
       ? [{ name: 'qwen', fn: tryQwenVision, keys: openrouterKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       : hasImages
-      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'mistral', fn: tryMistralVision, keys: mistralKeys }]
+      ? [{ name: 'gemini', fn: tryGemini, keys: geminiKeys }]
       // ТИМЧАСОВО (4 вер. 2026, після масового збою Gemini API 3 вер.):
       // "quality" (за замовчуванням у вчителя, перемикач ВИМКНЕНО) —
       // Cerebras ПЕРШИЙ. У Cerebras модель захардкожена на llama-3.3-70b
