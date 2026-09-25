@@ -148,7 +148,15 @@ async function tryGemini(body, keys) {
             generationConfig: {
               temperature: body.temperature ?? 0.5,
               maxOutputTokens: body.max_tokens ?? 1000,
-              responseMimeType: 'application/json'
+              responseMimeType: 'application/json',
+              // Опціонально: media_resolution ('low'|'medium'|'high') різко
+              // знижує кількість visual-токенів на фото (1120 за замовчуванням
+              // → 280 на 'low', 560 на 'medium') — досі НІХТО в бекенді цим не
+              // користувався, тому за замовчуванням поведінка НЕ змінюється
+              // (undefined -> Google сам ставить unspecified=1120, як і раніше).
+              ...(body.media_resolution
+                ? { mediaResolution: 'MEDIA_RESOLUTION_' + String(body.media_resolution).toUpperCase() }
+                : {})
             }
           })
         }
@@ -183,7 +191,22 @@ async function tryGemini(body, keys) {
 
       return {
         ok: true,
-        data: { choices: [{ message: { content: text } }] },
+        data: {
+          choices: [{ message: { content: text } }],
+          // usageMetadata — реальні токени від Gemini (не оцінка). Раніше
+          // взагалі не прокидувались далі — бекенд не мав жодного способу
+          // знати фактичну вартість запиту, тільки гадати по тарифній
+          // таблиці. Формат полів — як у OpenAI (prompt_tokens/
+          // completion_tokens), той самий, що вже природно повертають
+          // Groq/Cerebras (вони OpenAI-сумісні) — єдиний формат для
+          // будь-якого провайдера, з яким бекенду простіше рахувати.
+          usage: {
+            prompt_tokens: gData?.usageMetadata?.promptTokenCount ?? null,
+            completion_tokens: gData?.usageMetadata?.candidatesTokenCount ?? null,
+            total_tokens: gData?.usageMetadata?.totalTokenCount ?? null,
+            cached_tokens: gData?.usageMetadata?.cachedContentTokenCount ?? null,
+          },
+        },
         providerUsed: 'gemini',
         keyIndex: i + 1
       };
@@ -503,7 +526,10 @@ export default async function handler(req, res) {
       if (result.ok) {
         res.setHeader('X-Provider-Used', result.providerUsed);
         res.setHeader('X-Key-Index', String(result.keyIndex));
-        res.status(200).json(result.data);
+        // provider_used прямо в тілі відповіді — заголовки читати з
+        // requests.Response складніше й легше забути, ніж просто взяти
+        // поле з JSON, який бекенд і так уже парсить.
+        res.status(200).json({ ...result.data, provider_used: result.providerUsed });
         return;
       }
       console.log('[ai.js] provider failed:', p.name, result.error);
