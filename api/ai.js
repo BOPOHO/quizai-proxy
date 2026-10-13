@@ -109,11 +109,17 @@ async function tryCerebras(body, keys) {
 // выходит дешевле поколение. Раньше имя было зашито прямо в код — любая
 // смена требовала правки файла и редеплоя. Теперь это переменная окружения
 // GEMINI_MODEL в Vercel (Project Settings → Environment Variables) — смена
-// модели = поменять значение там и всё, без деплоя. 'gemini-3.5-flash-lite'
-// ниже — это только дефолт на случай, если переменная не задана, не
-// "текущая актуальная модель"; актуальное имя смотреть на
-// https://ai.google.dev/gemini-api/docs/models
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
+// модели = поменять значение там и всё, без деплоя. Значение ниже — только
+// дефолт на случай, если переменная не задана, не "текущая актуальная
+// модель"; актуальное имя смотреть на https://ai.google.dev/gemini-api/docs/models
+//
+// 2026-10-13: ТЕСТОВО переключено с 'gemini-3.5-flash-lite' на
+// 'gemini-3.1-flash-lite' ($0.25/$1.50 за млн токенів проти $0.30/$2.50 у
+// 3.5 — дешевше, але 3.1 старша/легша модель, якість розпізнавання
+// почерку НЕ підтверджена, перевіряємо на реальних роботах. Якщо почерк
+// почне читатись гірше (більше розбіжностей між проходами, скарги
+// вчителів) — відкотити назад на 'gemini-3.5-flash-lite'.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 
 async function tryGemini(body, keys) {
   const geminiMessages = body.messages || [];
