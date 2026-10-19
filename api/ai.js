@@ -530,6 +530,15 @@ export default async function handler(req, res) {
       : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
 
     let lastResult = null;
+    // Олексій, QA 19.10.2026: клас-асистент падав з "All providers failed.
+    // Last error: Gemini HTTP 503 on key #5" — і цей фінальний текст
+    // показував ЛИШЕ помилку ОСТАННЬОГО провайдера в ланцюжку. Якщо перед
+    // Gemini вже впали Groq і Cerebras (інакше до Gemini справа б не
+    // дійшла), їхні справжні помилки просто викидались — діагностувати
+    // "чому саме цей запит не йде через Groq, хоча інші запити йдуть"
+    // було неможливо без ручного відтворення. Тепер збираємо помилку
+    // КОЖНОГО реально спробуваного провайдера.
+    const attemptedErrors = [];
     for (const p of providers) {
       if (!p.keys.length) continue;
       console.log('[ai.js] trying provider:', p.name);
@@ -544,6 +553,7 @@ export default async function handler(req, res) {
         return;
       }
       console.log('[ai.js] provider failed:', p.name, result.error);
+      attemptedErrors.push(p.name + ': ' + (result.error || 'unknown'));
       lastResult = result;
     }
 
@@ -556,7 +566,9 @@ export default async function handler(req, res) {
     if (statusToClient === 404) statusToClient = 502;
 
     res.status(statusToClient).json({
-      error: 'All providers failed. Last error: ' + (lastResult?.error || 'unknown'),
+      error: 'All providers failed. ' + (attemptedErrors.length
+        ? attemptedErrors.join(' | ')
+        : 'No provider had keys configured for this request.'),
     });
   } catch (e) {
     console.error('[ai.js] UNCAUGHT ERROR:', e);
