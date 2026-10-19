@@ -170,6 +170,11 @@ async function tryGemini(body, keys) {
   });
 
   let lastError = null, lastStatus = null;
+  // 19.10.2026 QA: лог завжди показував лише "key #5" (останній перебраний
+  // ключ) — незрозуміло, падає один конкретний ключ чи ВСІ ключі з однаковим
+  // 503. keyStatuses збирає статус КОЖНОГО ключа, щоб відповідь при повному
+  // провалі показувала розподіл, а не тільки останню спробу.
+  const keyStatuses = [];
   for (let i = 0; i < keys.length; i++) {
     try {
       const gRes = await fetchWithTimeout(
@@ -205,6 +210,7 @@ async function tryGemini(body, keys) {
       if (gRes.status === 429 || gRes.status >= 500) {
         lastError = 'Gemini HTTP ' + gRes.status + ' on key #' + (i + 1);
         lastStatus = gRes.status;
+        keyStatuses.push(gRes.status);
         continue;
       }
 
@@ -213,6 +219,7 @@ async function tryGemini(body, keys) {
       if (modelDead) {
         lastError = 'Gemini model "' + GEMINI_MODEL + '" is deprecated by Google: ' + rawMsg.slice(0, 200);
         lastStatus = 502; // не пробрасываем чужой 404 как свой — это не "роут не найден"
+        keyStatuses.push('model_dead');
         break;
       }
 
@@ -221,6 +228,7 @@ async function tryGemini(body, keys) {
         // Любую прочую ошибку тоже не отдаём клиенту как есть, если это 4xx
         // не из нашего собственного роутинга — переводим в 502.
         lastStatus = gRes.status >= 400 && gRes.status < 500 ? 502 : gRes.status;
+        keyStatuses.push(gRes.status);
         continue;
       }
 
@@ -248,9 +256,18 @@ async function tryGemini(body, keys) {
     } catch (e) {
       lastError = 'Gemini network error on key #' + (i + 1) + (e.name === 'AbortError' ? ' (timeout > ' + PROVIDER_TIMEOUT_MS + 'ms)' : ': ' + e.message);
       lastStatus = 502;
+      keyStatuses.push('network_error');
       continue;
     }
   }
+  if (!keyStatuses.length) return { ok: false, error: lastError, status: lastStatus };
+  // Підсумок замість "тільки останній ключ": "5/5 keys failed: 503x5" або
+  // "5/5 keys failed: 503x4, 429x1", щоб було видно одразу — валиться ОДИН
+  // ключ, чи весь проєкт/квота (всі ключі з однаковим кодом).
+  const counts = {};
+  for (const s of keyStatuses) counts[s] = (counts[s] || 0) + 1;
+  const breakdown = Object.entries(counts).map(([s, n]) => s + 'x' + n).join(', ');
+  lastError = keyStatuses.length + '/' + keys.length + ' keys failed (' + breakdown + '). Last: ' + lastError;
   return { ok: false, error: lastError, status: lastStatus };
 }
 
