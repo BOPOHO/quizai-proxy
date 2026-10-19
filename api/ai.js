@@ -75,31 +75,55 @@ async function tryGroq(body, keys) {
 }
 
 // Cerebras — OpenAI-совместимый формат, как Groq. Бесплатный тариф:
-// 1 млн токенов/день, без карты. Модель llama-3.3-70b (не -versatile, у Cerebras своё имя).
+// 1 млн токенов/день, без карты.
+//
+// 2026-10-19 QA: 'llama-3.3-70b' стабільно повертає HTTP 404 "Model does
+// not exist or you do not have access to it" на ВСІХ запитах (не тільки
+// великих) — рядок моделі збігається з офіційним реєстром Cerebras, тож
+// це схоже на обмеження доступу цього акаунту/тарифу до цієї моделі, а не
+// на друкарську помилку. Замість сліпої заміни (ризик вгадати ще одну
+// недоступну модель) — пробуємо 'llama-3.3-70b' першим (як і раніше), і
+// лише при HTTP 404 на цій моделі повторюємо той самий запит з
+// 'gpt-oss-120b' (підтверджено доступна на Cerebras: support.cerebras.net
+// та офіційна ai-sdk/promptfoo документація), перш ніж переходити до
+// наступного ключа. Якщо виявиться, що 'llama-3.3-70b' взагалі ніколи не
+// спрацьовує — можна буде прибрати першу спробу і лишити тільки
+// gpt-oss-120b, але поки лишаємо обидві, щоб нічого не зламати, якщо
+// доступ до llama відновиться.
+const CEREBRAS_MODEL_PRIMARY = 'llama-3.3-70b';
+const CEREBRAS_MODEL_FALLBACK = 'gpt-oss-120b';
+
 async function tryCerebras(body, keys) {
   let lastError = null, lastStatus = null;
   for (let i = 0; i < keys.length; i++) {
-    try {
-      const response = await fetchWithTimeout('https://api.cerebras.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keys[i] },
-        body: JSON.stringify({ ...body, model: 'llama-3.3-70b', response_format: { type: 'json_object' } }),
-      });
-      if (response.status === 429 || response.status >= 500) {
-        lastError = 'Cerebras HTTP ' + response.status + ' on key #' + (i + 1);
-        lastStatus = response.status;
-        continue;
+    for (const model of [CEREBRAS_MODEL_PRIMARY, CEREBRAS_MODEL_FALLBACK]) {
+      try {
+        const response = await fetchWithTimeout('https://api.cerebras.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + keys[i] },
+          body: JSON.stringify({ ...body, model, response_format: { type: 'json_object' } }),
+        });
+        if (response.status === 429 || response.status >= 500) {
+          lastError = 'Cerebras HTTP ' + response.status + ' on key #' + (i + 1) + ' model ' + model;
+          lastStatus = response.status;
+          continue;
+        }
+        const data = await response.json();
+        if (!response.ok) {
+          lastError = 'Cerebras HTTP ' + response.status + ' on key #' + (i + 1) + ' model ' + model + ': ' + JSON.stringify(data).slice(0, 200);
+          lastStatus = response.status;
+          // 404 "model not found" — ця модель недоступна на цьому акаунті,
+          // пробуємо fallback-модель з тим самим ключем. Будь-яка інша
+          // помилка (401, 400 тощо) з fallback-моделлю теж не допоможе, але
+          // спроба дешева (1 зайвий HTTP-запит), тож не ускладнюємо логіку.
+          if (response.status === 404 && model === CEREBRAS_MODEL_PRIMARY) continue;
+          break; // не-404 помилка (або вже fallback не спрацював) — йдемо до наступного ключа
+        }
+        return { ok: true, data, providerUsed: 'cerebras', keyIndex: i + 1 };
+      } catch (e) {
+        lastError = 'Cerebras network error on key #' + (i + 1) + ' model ' + model + (e.name === 'AbortError' ? ' (timeout > ' + PROVIDER_TIMEOUT_MS + 'ms)' : ': ' + e.message);
+        break;
       }
-      const data = await response.json();
-      if (!response.ok) {
-        lastError = 'Cerebras HTTP ' + response.status + ' on key #' + (i + 1) + ': ' + JSON.stringify(data).slice(0, 200);
-        lastStatus = response.status;
-        continue;
-      }
-      return { ok: true, data, providerUsed: 'cerebras', keyIndex: i + 1 };
-    } catch (e) {
-      lastError = 'Cerebras network error on key #' + (i + 1) + (e.name === 'AbortError' ? ' (timeout > ' + PROVIDER_TIMEOUT_MS + 'ms)' : ': ' + e.message);
-      continue;
     }
   }
   return { ok: false, error: lastError, status: lastStatus };
