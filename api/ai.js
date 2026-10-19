@@ -175,6 +175,13 @@ async function tryGemini(body, keys) {
   // 503. keyStatuses збирає статус КОЖНОГО ключа, щоб відповідь при повному
   // провалі показувала розподіл, а не тільки останню спробу.
   const keyStatuses = [];
+  // 19.10.2026: "5/5 keys failed (400x1, 503x4)" каже, скільки, але не ЩО
+  // саме відповів Google на той один 400 (найімовірніше винуватець — 503 це
+  // типовий "перевантажено", а 400 на тому самому запиті, що в решти ключів
+  // дає 503, схоже на проблему з GEMINI_MODEL/форматом, а не з конкретним
+  // ключем). Зберігаємо тіло відповіді для ПЕРШОГО входження кожного
+  // унікального статусу.
+  const bodyByStatus = {};
   for (let i = 0; i < keys.length; i++) {
     try {
       const gRes = await fetchWithTimeout(
@@ -211,6 +218,7 @@ async function tryGemini(body, keys) {
         lastError = 'Gemini HTTP ' + gRes.status + ' on key #' + (i + 1);
         lastStatus = gRes.status;
         keyStatuses.push(gRes.status);
+        if (!bodyByStatus[gRes.status]) bodyByStatus[gRes.status] = JSON.stringify(gData).slice(0, 180);
         continue;
       }
 
@@ -229,6 +237,7 @@ async function tryGemini(body, keys) {
         // не из нашего собственного роутинга — переводим в 502.
         lastStatus = gRes.status >= 400 && gRes.status < 500 ? 502 : gRes.status;
         keyStatuses.push(gRes.status);
+        if (!bodyByStatus[gRes.status]) bodyByStatus[gRes.status] = JSON.stringify(gData).slice(0, 180);
         continue;
       }
 
@@ -267,7 +276,8 @@ async function tryGemini(body, keys) {
   const counts = {};
   for (const s of keyStatuses) counts[s] = (counts[s] || 0) + 1;
   const breakdown = Object.entries(counts).map(([s, n]) => s + 'x' + n).join(', ');
-  lastError = keyStatuses.length + '/' + keys.length + ' keys failed (' + breakdown + '). Last: ' + lastError;
+  const bodies = Object.entries(bodyByStatus).map(([s, b]) => s + ': ' + b).join(' || ');
+  lastError = keyStatuses.length + '/' + keys.length + ' keys failed (' + breakdown + ') model=' + GEMINI_MODEL + '. Bodies: ' + bodies;
   return { ok: false, error: lastError, status: lastStatus };
 }
 
