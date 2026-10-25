@@ -290,6 +290,55 @@ async function tryGemini(body, keys) {
   return { ok: false, error: lastError, status: lastStatus };
 }
 
+// 25.10.2026, Олексій: отримав безкоштовний ключ OpenRouter і попросив
+// додати його як РЕЗЕРВ для звичайного ТЕКСТОВОГО чату (не тільки для
+// vision-перевірки Algebra Pack, де OPENROUTER_KEY вже використовується).
+// Привід — Cerebras того тижня масово валився 402 payment_required
+// (кредити закінчились), а Groq впирався в TPM-ліміт (8000) на довгих
+// запитах class_assistant_chat — третього живого фолбека по факту не
+// лишалось. model: 'openai/gpt-oss-120b:free' — той самий gpt-oss-120b,
+// що вже використовує Groq (однакова поведінка/якість відповіді),
+// просто інший провайдер і інший ліміт квоти.
+async function tryOpenRouterText(body, keys) {
+  let lastError = null, lastStatus = null;
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + keys[i],
+        },
+        body: JSON.stringify({
+          model: 'openai/gpt-oss-120b:free',
+          messages: body.messages,
+          max_tokens: body.max_tokens ?? 1000,
+          temperature: body.temperature ?? 0.5,
+          response_format: { type: 'json_object' },
+        }),
+      });
+      if (response.status === 429 || response.status >= 500) {
+        lastError = 'OpenRouter HTTP ' + response.status + ' on key #' + (i + 1);
+        lastStatus = response.status;
+        continue;
+      }
+      const data = await response.json().catch(() => null);
+      const text = data?.choices?.[0]?.message?.content;
+      if (!response.ok || !text) {
+        lastError = 'OpenRouter HTTP ' + response.status + ' on key #' + (i + 1) + ': ' + JSON.stringify(data).slice(0, 200);
+        lastStatus = response.status >= 400 && response.status < 500 ? 502 : response.status;
+        continue;
+      }
+      return { ok: true, data: { choices: [{ message: { content: text } }], usage: data.usage }, providerUsed: 'openrouter', keyIndex: i + 1 };
+    } catch (e) {
+      lastError = 'OpenRouter network error on key #' + (i + 1) + (e.name === 'AbortError' ? ' (timeout > ' + PROVIDER_TIMEOUT_MS + 'ms)' : ': ' + e.message);
+      lastStatus = 502;
+      continue;
+    }
+  }
+  return { ok: false, error: lastError, status: lastStatus };
+}
+
 // Qwen2.5-VL-72B через OpenRouter (безкоштовний тір) — навмисно ІНШИЙ
 // провайдер, не Gemini вдруге. Використовується як другий незалежний
 // прохід у dual-pass верифікації Algebra Pack: якщо ОБИДВА проходи на
@@ -584,10 +633,10 @@ export default async function handler(req, res) {
       // формулює/перевіряє питання. Gemini лишається останнім в обох
       // режимах, поки не стабілізується після збою.
       : priority === 'quality_deep'
-      ? [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
+      ? [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'openrouter', fn: tryOpenRouterText, keys: openrouterKeys }]
       : priority === 'quality'
-      ? [{ name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }]
-      : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }];
+      ? [{ name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'openrouter', fn: tryOpenRouterText, keys: openrouterKeys }]
+      : [{ name: 'groq', fn: tryGroq, keys: groqKeys }, { name: 'cerebras', fn: tryCerebras, keys: cerebrasKeys }, { name: 'gemini', fn: tryGemini, keys: geminiKeys }, { name: 'openrouter', fn: tryOpenRouterText, keys: openrouterKeys }];
 
     let lastResult = null;
     // Олексій, QA 19.10.2026: клас-асистент падав з "All providers failed.
