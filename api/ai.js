@@ -145,7 +145,15 @@ async function tryCerebras(body, keys) {
 // модель для теста — просто поменяй строку ниже и запушь.
 const GEMINI_MODEL = 'gemini-3.1-flash-lite'; // ← меняй тут, не в Vercel
 
+// 27.10.2026, Олексій: для укр.мови (розпізнавання почерку в диктантах/творах)
+// flash-lite занадто слабо читає щільний курсив — вигадує неіснуючі слова.
+// Замість зміни GEMINI_MODEL ГЛОБАЛЬНО (що підняло б ціну і для алгебри,
+// географії тощо, де короткий текст і flash-lite вистачає), бекенд може
+// передати body.gemini_model — опціональний оверрайд ЛИШЕ для цього
+// конкретного запиту. Якщо не передано — поведінка для всіх інших
+// предметів лишається точно такою ж, як і раніше (дефолт GEMINI_MODEL).
 async function tryGemini(body, keys) {
+  const model = body.gemini_model || GEMINI_MODEL;
   const geminiMessages = body.messages || [];
   const systemMsg = geminiMessages.find(m => m.role === 'system')?.content || '';
   const userMsgs = geminiMessages.filter(m => m.role !== 'system');
@@ -185,7 +193,7 @@ async function tryGemini(body, keys) {
   for (let i = 0; i < keys.length; i++) {
     try {
       const gRes = await fetchWithTimeout(
-        'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent?key=' + keys[i],
+        'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + keys[i],
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -234,7 +242,7 @@ async function tryGemini(body, keys) {
       // якщо модель ДІЙСНО знята, усі ключі однаково впадуть у model_dead,
       // і це так само чесно відобразиться як "5/5 model_dead" в діагностиці.
       if (modelDead) {
-        lastError = 'Gemini model "' + GEMINI_MODEL + '" is deprecated by Google: ' + rawMsg.slice(0, 200);
+        lastError = 'Gemini model "' + model + '" is deprecated by Google: ' + rawMsg.slice(0, 200);
         lastStatus = 502; // не пробрасываем чужой 404 как свой — это не "роут не найден"
         keyStatuses.push('model_dead');
         continue;
@@ -286,7 +294,7 @@ async function tryGemini(body, keys) {
   for (const s of keyStatuses) counts[s] = (counts[s] || 0) + 1;
   const breakdown = Object.entries(counts).map(([s, n]) => s + 'x' + n).join(', ');
   const bodies = Object.entries(bodyByStatus).map(([s, b]) => s + ': ' + b).join(' || ');
-  lastError = keyStatuses.length + '/' + keys.length + ' keys failed (' + breakdown + ') model=' + GEMINI_MODEL + '. Bodies: ' + bodies;
+  lastError = keyStatuses.length + '/' + keys.length + ' keys failed (' + breakdown + ') model=' + model + '. Bodies: ' + bodies;
   return { ok: false, error: lastError, status: lastStatus };
 }
 
